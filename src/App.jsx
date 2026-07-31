@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { enablePushNotifications, getPushSubscriptionStatus, sendPushNotification } from "./pushNotifications.js";
 import {
   Plus, Trash2, Users, Clock, JapaneseYen, AlertTriangle, RotateCcw,
   ChevronDown, ChevronUp, Moon, Copy, Check, TrendingUp, Loader2, X,
@@ -402,6 +403,12 @@ export default function ShiftApp() {
   }, []);
 
   const [lastRefreshed, setLastRefreshed] = useState(null);
+  const [pushStatus, setPushStatus] = useState("not-subscribed");
+  const [toastPush, setToastPush] = useState("");
+
+  useEffect(() => {
+    getPushSubscriptionStatus().then(setPushStatus).catch(() => {});
+  }, []);
 
   const refreshSharedData = async () => {
     try {
@@ -597,11 +604,26 @@ export default function ShiftApp() {
             </button>
           </div>
           {saveError && <span className="text-xs" style={{ color: "#C4453B" }}>保存エラーが発生しました。通信環境をご確認ください。</span>}
-          <button onClick={refreshSharedData} className="ml-auto flex items-center gap-1 text-xs px-2 py-1 rounded" style={{ color: "#8A8776" }}>
+          <button
+            onClick={async () => {
+              const ok = await enablePushNotifications();
+              if (ok) { setPushStatus("subscribed"); setToastPush("通知を有効にしました"); setTimeout(() => setToastPush(""), 2500); }
+            }}
+            disabled={pushStatus === "subscribed"}
+            className="ml-auto flex items-center gap-1 text-xs px-2 py-1 rounded"
+            style={{ color: pushStatus === "subscribed" ? "#2F7D4F" : "#8A8776" }}
+          >
+            <Megaphone size={12} />
+            {pushStatus === "subscribed" ? "通知 有効" : "通知を有効にする"}
+          </button>
+          <button onClick={refreshSharedData} className="flex items-center gap-1 text-xs px-2 py-1 rounded" style={{ color: "#8A8776" }}>
             <RefreshCw size={12} />
             {lastRefreshed ? `最終更新 ${lastRefreshed.getHours()}:${String(lastRefreshed.getMinutes()).padStart(2, "0")}` : "今すぐ更新"}
           </button>
         </div>
+        {toastPush && (
+          <div className="mb-2 text-xs px-3 py-1.5 rounded-lg" style={{ background: "#2F7D4F15", color: "#2F7D4F" }}>{toastPush}</div>
+        )}
 
         {newPostingAlert && (
           <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg" style={{ background: "#8A6D1F15" }}>
@@ -3051,6 +3073,7 @@ function AdminView({
                             const payload = { open: true, wage: effectiveGigWage, note: gap.slot.label, helpStore: storeName, applicants: {}, deadline, recruitCount };
                             if (adminRole === "store") payload.password = pwDrafts[pk].trim();
                             persistPostings({ ...postings, [pk]: payload });
+                            sendPushNotification("新しい募集があります", `${storeName}：${gap.slot.label}（スキマワーク）`);
                             if (adminRole === "store") setUnlockedPostings((prev) => ({ ...prev, [pk]: true }));
                           }}
                           className="flex items-center gap-1 text-xs px-2.5 py-1 rounded font-medium"
@@ -4472,6 +4495,7 @@ function GigApplyView({ storeName, storeList, commuteFare, staff, persistRoster,
       };
       const nextApplicants = { ...item.applicants, [appKey]: applicantRecord };
       await persistPostings({ ...postings, [item.pk]: { ...postings[item.pk], applicants: nextApplicants } });
+      sendPushNotification("新しい応募がありました", `${draft.name.trim()}さんが「${item.note || item.helpStore}」に応募しました`);
       await saveJSON("myGigProfile", draft, false);
       setProfile(draft);
       setOpenFormPk(null);
