@@ -833,6 +833,14 @@ function AdminView({
     const k = key(dayIdx, slotId);
     const cur = assignments[k] || [];
     const wasAssigned = cur.includes(staffId);
+    if (!wasAssigned) {
+      const slot = slots.find((s) => s.id === slotId);
+      const req = slot ? getRequired(dayIdx, slot) : 0;
+      if (cur.length >= req) {
+        alert(`この時間帯はすでに必要人数（${req}名）に達しています。追加する場合は、先に必要人数を増やすか、他の人を外してください。`);
+        return;
+      }
+    }
     const next = wasAssigned ? cur.filter((x) => x !== staffId) : [...cur, staffId];
     persistAssignments({ ...assignments, [k]: next });
     const tKey = atKey(dayIdx, slotId, staffId);
@@ -902,7 +910,7 @@ function AdminView({
       return { ...s, defaultTasks: next };
     }));
   };
-  const addSlot = () => persistSlots([...slots, { id: nextId("s"), label: "新規", start: "00:00", end: "04:00", required: 1, daysRequired: Array(7).fill(1) }]);
+  const addSlot = () => persistSlots([...slots, { id: nextId("s"), label: "新規", start: "00:00", end: "04:00", required: 2, daysRequired: Array(7).fill(2) }]);
   const removeSlot = (id) => {
     persistSlots(slots.filter((s) => s.id !== id));
     const nextA = {};
@@ -2595,6 +2603,24 @@ function AdminView({
           <div className="flex items-center gap-2"><span className="icon-badge" style={{ background: "#1B2A4A15" }}><Clock size={15} style={{ color: "#1B2A4A" }} /></span><h2 className="font-semibold text-sm" style={{ color: "#1B2A4A" }}>シフト表（{storeName}）</h2></div>
           {conflictCount > 0 && <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "#C4453B15", color: "#C4453B" }}><AlertTriangle size={12} /> 条件違反 {conflictCount}件</span>}
           <div className="ml-auto flex items-center gap-2">
+            {(() => {
+              const weekOverrideCount = Object.keys(requiredOverrides).filter((k) => k.startsWith(`${weekStart}__`)).length;
+              if (weekOverrideCount === 0) return null;
+              return (
+                <button
+                  onClick={() => {
+                    if (!confirm(`この週には、特定の日だけ必要人数を変更している枠が${weekOverrideCount}件あります。すべて通常の人数に戻しますか？`)) return;
+                    const next = { ...requiredOverrides };
+                    Object.keys(next).forEach((k) => { if (k.startsWith(`${weekStart}__`)) delete next[k]; });
+                    persistRequiredOverrides(next);
+                  }}
+                  className="flex items-center gap-1 text-xs px-2.5 py-1 rounded font-medium"
+                  style={{ background: "#D98E0415", color: "#8A6D1F" }}
+                >
+                  <AlertTriangle size={12} /> この週の人数特例（{weekOverrideCount}件）を確認
+                </button>
+              );
+            })()}
             <button onClick={autoAssignBase} className="flex items-center gap-1 text-xs px-2.5 py-1 rounded font-medium" style={{ background: "#12756B15", color: "#12756B" }}><RefreshCw size={12} /> 自動割り当て</button>
             <button onClick={() => persistAssignments({})} className="flex items-center gap-1 text-xs px-2 py-1 rounded" style={{ color: "#B5562B" }}><RotateCcw size={12} /> 全クリア</button>
             <button onClick={() => window.print()} className="flex items-center gap-1 text-xs px-3 py-1.5 rounded font-medium" style={{ background: "#1B2A4A", color: "white" }}>
@@ -2667,7 +2693,7 @@ function AdminView({
                   const conflict = availReason || nightConflict || tenureConflict;
                   const assignedTasks = taskAssignments[atKey(dayIdx, slot.id, staffId)] || [];
                   const displayTasks = p.isLeader ? [...new Set(["👑 リーダー", ...assignedTasks])] : assignedTasks;
-                  rawBars.push({ isEmpty: false, staffId, name: p.name, isNewHire: tenureConflict, color: typeColor(p.type), startHour: toAxisHour(effTime.startHour), hours: effTime.hours, slot, effTime, conflict, conflictReasons: [availReason, nightConflict && "深夜不可", tenureConflict && "入社6ヶ月未満"].filter(Boolean), note: eff.note, assignedTasks: displayTasks });
+                  rawBars.push({ isEmpty: false, staffId, name: p.name, isNewHire: tenureConflict, color: typeColor(p.type), startHour: toAxisHour(effTime.startHour), hours: effTime.hours, slot, effTime, conflict, conflictReasons: [availReason, nightConflict && "深夜不可", tenureConflict && "入社6ヶ月未満"].filter(Boolean), note: eff.note, assignedTasks: displayTasks, overCapacity: ids.length > req });
                 });
                 if (ids.length < req) {
                   rawBars.push({ isEmpty: true, slot, startHour: toAxisHour(geom.startHour), hours: geom.hours, have: ids.length, req });
@@ -2728,12 +2754,12 @@ function AdminView({
                                 left: `calc(${left}% + 2px)`, width: `calc(${width}% - 4px)`,
                                 top: bar.lane * 26 + 5, height: 22,
                                 background: bar.color,
-                                border: bar.conflict ? "2px solid #C4453B" : bar.effTime.isOverride ? "2px dashed white" : "none",
+                                border: bar.conflict ? "2px solid #C4453B" : bar.overCapacity ? "2px solid #D98E04" : bar.effTime.isOverride ? "2px dashed white" : "none",
                               }}
-                              title={`${dispShort(date)} ${bar.slot.label} ${bar.effTime.start}-${bar.effTime.end} ${bar.name}${bar.effTime.isOverride ? "（手動調整済み）" : ""}${bar.conflict ? ` ⚠ ${bar.conflictReasons.join("・")}` : ""}${bar.note ? ` 備考:${bar.note}` : ""}`}
+                              title={`${dispShort(date)} ${bar.slot.label} ${bar.effTime.start}-${bar.effTime.end} ${bar.name}${bar.effTime.isOverride ? "（手動調整済み）" : ""}${bar.conflict ? ` ⚠ ${bar.conflictReasons.join("・")}` : ""}${bar.overCapacity ? " ⚠ 必要人数を超えて割り当てられています" : ""}${bar.note ? ` 備考:${bar.note}` : ""}`}
                             >
                               <span className="mono text-[10px] text-white px-1 truncate font-medium flex items-center gap-0.5">
-                                {bar.conflict && <AlertTriangle size={9} />}{bar.isNewHire && "🔰"}{bar.assignedTasks?.map((t) => t.match(/^\S+/)?.[0]).join("")}{bar.name}{crosses && " →"}
+                                {bar.conflict && <AlertTriangle size={9} />}{!bar.conflict && bar.overCapacity && <AlertTriangle size={9} color="#D98E04" />}{bar.isNewHire && "🔰"}{bar.assignedTasks?.map((t) => t.match(/^\S+/)?.[0]).join("")}{bar.name}{crosses && " →"}
                               </span>
                             </button>
                           );
@@ -2836,19 +2862,34 @@ function AdminView({
                     if (!slot) return null;
                     const already = assignments[key(dayIdx, slotId)] || [];
                     const req = getRequired(dayIdx, slot);
+                    const rk = `${weekStart}__${dayIdx}__${slotId}`;
+                    const hasOverride = requiredOverrides[rk] !== undefined;
+                    const defaultReq = slotDayCounts(slot)[dayIdx];
                     const candidates = ganttStaff.filter((p) => !already.includes(p.id));
                     return (
                       <div className="px-2 py-2 border-b" style={{ borderColor: "#EFEDE7", background: "#FAFAF8" }}>
-                        <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1.5">
                           <span className="text-xs" style={{ color: "#6B6A63" }}>{dispShort(date)} {slot.label}（{slot.start}〜{slot.end}）に割り当て　必要人数：
                             <input
                               type="number" min={0} value={req}
                               onChange={(e) => setRequiredFor(dayIdx, slot, Number(e.target.value))}
                               className="mono text-xs border rounded px-1.5 py-0.5 w-12 outline-none mx-1"
-                              style={{ borderColor: "#DCD9D0" }}
+                              style={{ borderColor: hasOverride ? "#D98E04" : "#DCD9D0" }}
                             />人
+                            {hasOverride && (
+                              <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: "#D98E0415", color: "#8A6D1F" }}>
+                                この日だけ変更中（通常は{defaultReq}人）
+                              </span>
+                            )}
                           </span>
-                          <button onClick={() => setAssignPickerKey(null)} className="text-xs px-2 py-1 rounded" style={{ background: "#1B2A4A", color: "white" }}>閉じる</button>
+                          <div className="flex items-center gap-1.5">
+                            {hasOverride && (
+                              <button onClick={() => resetRequiredFor(dayIdx, slot)} className="text-xs px-2 py-1 rounded font-medium" style={{ background: "#8A6D1F15", color: "#8A6D1F" }}>
+                                通常人数に戻す
+                              </button>
+                            )}
+                            <button onClick={() => setAssignPickerKey(null)} className="text-xs px-2 py-1 rounded" style={{ background: "#1B2A4A", color: "white" }}>閉じる</button>
+                          </div>
                         </div>
                         <div className="flex flex-wrap gap-1.5">
                           {candidates.length === 0 ? (
