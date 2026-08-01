@@ -225,6 +225,20 @@ const availabilityConflict = (win, geom) => {
   return null;
 };
 
+// Looser check used only by auto-assign: eligible if the person's submitted/override window
+// overlaps the slot AT ALL (not necessarily covering it fully). Auto-assign then uses just the
+// overlapping portion as their actual worked time via clipToSlot, so someone available 9-13 can
+// be placed into a broader 7-17:30 band and correctly worked only their own 9-13.
+const hasOverlapAvailability = (win, geom) => {
+  if (!win || !win.available) return false;
+  let s = parseHour(win.start);
+  let e = parseHour(win.end);
+  if (e <= s) e += 24;
+  const gs = geom.startHour;
+  const ge = geom.startHour + geom.hours;
+  return gs < e && s < ge;
+};
+
 const longestConsecutive = (daySet) => {
   let max = 0, cur = 0;
   for (let i = 0; i < 7; i++) { if (daySet.has(i)) { cur++; max = Math.max(max, cur); } else cur = 0; }
@@ -918,6 +932,56 @@ function AdminView({
     persistAssignments(nextA);
   };
 
+  const [mergeProposal, setMergeProposal] = useState(null); // array of merged slot proposals, or null if not computed/shown
+
+  const formatHM = (totalMinutes) => {
+    const m = ((totalMinutes % 1440) + 1440) % 1440;
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return `${h}:${String(mm).padStart(2, "0")}`;
+  };
+
+  const computeMergeProposal = () => {
+    // Represent every slot's time range in minutes-from-midnight, extending overnight slots
+    // past 1440 so a simple linear sweep can merge overlapping ranges correctly.
+    const intervals = slots.map((s) => {
+      const startMin = Math.round(parseHour(s.start) * 60);
+      let endMin = Math.round(parseHour(s.end) * 60);
+      if (endMin <= startMin) endMin += 1440;
+      return { startMin, endMin, daysRequired: slotDayCounts(s) };
+    });
+    intervals.sort((a, b) => a.startMin - b.startMin);
+
+    const merged = [];
+    intervals.forEach((iv) => {
+      const last = merged[merged.length - 1];
+      if (last && iv.startMin < last.endMin) {
+        // overlapping or touching an existing merged band — extend it and union the active weekdays
+        last.endMin = Math.max(last.endMin, iv.endMin);
+        last.daysActive = last.daysActive.map((active, d) => active || iv.daysRequired[d] > 0);
+      } else {
+        merged.push({ startMin: iv.startMin, endMin: iv.endMin, daysActive: iv.daysRequired.map((v) => v > 0) });
+      }
+    });
+
+    const proposal = merged.map((m, i) => ({
+      id: nextId("s"),
+      label: `${formatHM(m.startMin)}-${formatHM(m.endMin)}`,
+      start: formatHM(m.startMin),
+      end: formatHM(m.endMin),
+      required: 2,
+      daysRequired: m.daysActive.map((active) => (active ? 2 : 0)),
+    }));
+    setMergeProposal(proposal);
+  };
+
+  const adoptMergeProposal = () => {
+    if (!mergeProposal) return;
+    if (!confirm("今の時間帯設定を、提案した重ならない時間帯に置き換えます。よろしいですか？（今週以降のシフトの割り当ては、時間帯のIDが変わるため一度リセットが必要になる場合があります）")) return;
+    persistSlots(mergeProposal);
+    setMergeProposal(null);
+  };
+
   const applySubmission = (staffId, date) => {
     const subsForDay = submissions.filter((s) => s.staffId === staffId && s.date === date);
     if (!subsForDay.length) return;
@@ -1217,9 +1281,31 @@ function AdminView({
   // Pure fill function: takes explicit assignments/submissions/staff instead of reading from
   // component state, so it can be reused both by the live "自動割り当て" button (using current
   // state) and by the demo-fill flow (using freshly-seeded local data that hasn't hit state yet).
-  const autoFillFrom = (baseAssignments, subsList, staffList, weekDatesList, slotsList, overridesMap, baseTaskAssignments) => {
+  // Given a slot's full time span and a person's own preferred/submitted window, returns a
+  // narrower {start, end} to use as their actual worked time if their preference doesn't cover
+  // the whole slot — or null if their preference already covers the full slot (no override needed).
+  const clipToSlot = (slotStart, slotEnd, winStart, winEnd) => {
+    if (!winStart || !winEnd) return null;
+    const s0 = parseHour(slotStart);
+    let e0 = parseHour(slotEnd);
+    if (e0 <= s0) e0 += 24;
+    let ws = parseHour(winStart);
+    let we = parseHour(winEnd);
+    if (we <= ws) we += 24;
+    // Align the submitted window into the same 24h cycle as the slot, trying the closest match.
+    while (ws < s0 - 24) { ws += 24; we += 24; }
+    while (ws > s0 + 24) { ws -= 24; we -= 24; }
+    const clippedStart = Math.max(s0, ws);
+    const clippedEnd = Math.min(e0, we);
+    if (clippedStart <= s0 + 0.001 && clippedEnd >= e0 - 0.001) return null; // covers the full slot already
+    if (clippedEnd - clippedStart < 0.25) return null; // degenerate/near-zero overlap — leave as full slot
+    return { start: formatHM(Math.round(clippedStart * 60)), end: formatHM(Math.round(clippedEnd * 60)) };
+  };
+
+  const autoFillFrom = (baseAssignments, subsList, staffList, weekDatesList, slotsList, overridesMap, baseTaskAssignments, baseTimeOverrides) => {
     const nextAssignments = { ...baseAssignments };
     const nextTaskAssignments = { ...(baseTaskAssignments || {}) };
+    const nextTimeOverrides = { ...(baseTimeOverrides || {}) };
     const runningHours = {};
     const usedSlotsToday = {};
     staffList.forEach((p) => { runningHours[p.id] = 0; usedSlotsToday[p.id] = []; });
@@ -1270,7 +1356,7 @@ function AdminView({
             if (ids.includes(p.id)) return false;
             const win = effectiveWindowFrom(overridesMap, subsList, p.id, date);
             if (win.source !== "submission" && win.source !== "override") return false;
-            if (availabilityConflict(win, geom)) return false;
+            if (!hasOverlapAvailability(win, geom)) return false;
             if (!personNightOk(p) && isNightSlot(geom)) return false;
             if (runningHours[p.id] + geom.hours > (p.maxHours || 9999)) return false;
             const overlaps = usedSlotsToday[p.id].some((u) => u.dayIdx === dayIdx && geom.startHour < u.startHour + u.hours && u.startHour < geom.startHour + geom.hours);
@@ -1287,10 +1373,23 @@ function AdminView({
           if (candidates.length === 0) break;
           candidates.sort((a, b) => runningHours[a.id] - runningHours[b.id] || a.name.localeCompare(b.name, "ja"));
           const chosen = candidates[0];
+          const chosenWin = effectiveWindowFrom(overridesMap, subsList, chosen.id, date);
+          const clipped = clipToSlot(slot.start, slot.end, chosenWin.start, chosenWin.end);
+          let actualHours = geom.hours;
+          let actualStartHour = geom.startHour;
+          if (clipped) {
+            const tk = atKey(dayIdx, slot.id, chosen.id);
+            nextTimeOverrides[tk] = clipped;
+            let cs = parseHour(clipped.start);
+            let ce = parseHour(clipped.end);
+            if (ce <= cs) ce += 24;
+            actualHours = ce - cs;
+            actualStartHour = cs;
+          }
           ids = [...ids, chosen.id];
           nextAssignments[k] = ids;
-          runningHours[chosen.id] += geom.hours;
-          usedSlotsToday[chosen.id].push({ dayIdx, startHour: geom.startHour, hours: geom.hours });
+          runningHours[chosen.id] += actualHours;
+          usedSlotsToday[chosen.id].push({ dayIdx, startHour: actualStartHour, hours: actualHours });
           filledCount++;
         }
         // Distribute this slot's default task marks (cleaning duties etc.) across whoever ended up
@@ -1320,13 +1419,14 @@ function AdminView({
       });
     });
 
-    return { nextAssignments, nextTaskAssignments, filledCount };
+    return { nextAssignments, nextTaskAssignments, nextTimeOverrides, filledCount };
   };
 
   const autoAssignBase = () => {
-    const { nextAssignments, nextTaskAssignments, filledCount } = autoFillFrom(assignments, submissions, storeStaff, weekDates, slots, overrides, taskAssignments);
+    const { nextAssignments, nextTaskAssignments, nextTimeOverrides, filledCount } = autoFillFrom(assignments, submissions, storeStaff, weekDates, slots, overrides, taskAssignments, assignmentTimeOverrides);
     persistAssignments(nextAssignments);
     persistTaskAssignments(nextTaskAssignments);
+    persistAssignmentTimeOverrides(nextTimeOverrides);
     setAutoAssignResult(filledCount);
     setTimeout(() => setAutoAssignResult(null), 4000);
   };
@@ -1908,6 +2008,27 @@ function AdminView({
                   );
                 })}
                 <button onClick={addSlot} className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border font-medium" style={{ borderColor: "#DCD9D0", color: "#1B2A4A" }}><Plus size={12} /> 追加</button>
+                <div className="mt-2 pt-2 border-t" style={{ borderColor: "#EFEDE7" }}>
+                  <button onClick={computeMergeProposal} className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded font-medium" style={{ background: "#D98E0415", color: "#8A6D1F" }}>
+                    <RefreshCw size={12} /> 重なりを解消して提案する
+                  </button>
+                  <p className="text-[10px] mt-1" style={{ color: "#8A8776" }}>時間帯同士が重なっていると、その重なった時間だけ必要人数が足し算されてしまいます。今の時間帯を分析して、重ならない形（各枠2人）に組み直す提案を作ります。</p>
+                  {mergeProposal && (
+                    <div className="mt-2 p-2 rounded border" style={{ borderColor: "#D98E04", background: "#FAFAF8" }}>
+                      <p className="text-xs font-semibold mb-1.5" style={{ color: "#1B2A4A" }}>提案する時間帯（{mergeProposal.length}件・すべて2人）</p>
+                      <div className="flex flex-wrap gap-1.5 mb-2">
+                        {mergeProposal.map((p) => (
+                          <span key={p.id} className="text-[11px] px-2 py-1 rounded-full font-medium" style={{ background: "#1B2A4A0D", color: "#1B2A4A" }}>{p.label}</span>
+                        ))}
+                      </div>
+                      <p className="text-[10px] mb-2" style={{ color: "#8A8776" }}>採用すると、今の時間帯の一覧がこの内容に置き換わります（今の割り当て済みシフトは、対応する時間帯がなくなるため見えなくなる場合があります）。</p>
+                      <div className="flex gap-1.5">
+                        <button onClick={adoptMergeProposal} className="text-xs px-3 py-1.5 rounded font-medium text-white" style={{ background: "#12756B" }}>この内容で置き換える</button>
+                        <button onClick={() => setMergeProposal(null)} className="text-xs px-3 py-1.5 rounded font-medium" style={{ background: "#EFEDE7", color: "#6B6A63" }}>キャンセル</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
