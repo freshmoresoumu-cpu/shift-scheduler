@@ -573,9 +573,7 @@ export default function ShiftApp() {
         .perforated { background-image: radial-gradient(circle, #F5F4F0 3px, transparent 3.5px); background-size: 14px 14px; background-position: -4px -4px; height: 10px; }
         .slot-cell { transition: background 0.12s ease; cursor: pointer; }
         .slot-cell:hover { background: rgba(27,42,74,0.05); }
-        .understaffed-mark { animation: pulse-warn 1.8s ease-in-out infinite; }
-        @media print { .understaffed-mark { display: none !important; } }
-        @keyframes pulse-warn { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
         .daychip { transition: all 0.12s ease; }
         .daychip:active { transform: scale(0.94); }
         .modebtn { transition: all 0.2s ease; }
@@ -2857,7 +2855,7 @@ function AdminView({
             </button>
           </div>
         )}
-        <p className="text-xs mb-3" style={{ color: "#8A8776" }}>名前付きのバーをタップすると、条件違反の理由・備考とあわせて「修正」「削除」ボタンが出ます（タップしただけで消えることはありません）。点線の「＋不足○名」枠をタップすると人を割り当てられます。縦＝日付、横＝24時制（朝7時始まり）の時間軸です。</p>
+        <p className="text-xs mb-3" style={{ color: "#8A8776" }}>名前付きのバーをタップすると、条件違反の理由・備考とあわせて「修正」「削除」ボタンが出ます（タップしただけで消えることはありません）。人が入っていない時間帯をタップすると割り当てられます（下の「過不足」欄に−1・−2として不足人数が表示されます）。縦＝日付、横＝24時制（朝7時始まり）の時間軸です。</p>
         <div className="flex flex-wrap gap-2 mb-3">
           {TYPE_GROUP_ORDER.filter((t) => ganttStaff.some((p) => p.type === t)).map((t) => (
             <span key={t} className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ background: `${typeColor(t)}15`, color: typeColor(t) }}>
@@ -2880,8 +2878,9 @@ function AdminView({
               <div className="px-3 py-6 text-center text-sm" style={{ color: "#8A8776" }}>週の日付がありません。</div>
             )}
             {weekDates.map((date, dayIdx) => {
-              // gather all (slot, staff) bars for this date, plus "empty capacity" markers for understaffed slots
+              // gather all (slot, staff) bars for this date; shortfall is tracked separately as an hourly strip
               const rawBars = [];
+              const hourlyDeficit = Array(24).fill(0); // index = axis-hour bucket (0 = AXIS_START_HOUR)
               slots.forEach((slot) => {
                 const ids = assignments[key(dayIdx, slot.id)] || [];
                 const geom = slotGeom[slot.id];
@@ -2899,7 +2898,14 @@ function AdminView({
                   const displayTasks = p.isLeader ? [...new Set(["👑 リーダー", ...assignedTasks])] : assignedTasks;
                   rawBars.push({ isEmpty: false, staffId, name: p.name, isNewHire: tenureConflict, color: typeColor(p.type), startHour: toAxisHour(effTime.startHour), hours: effTime.hours, slot, effTime, conflict, conflictReasons: [availReason, nightConflict && "深夜不可", tenureConflict && "入社6ヶ月未満"].filter(Boolean), note: eff.note, assignedTasks: displayTasks, overCapacity: ids.length > req });
                 });
-                if (ids.length < req) {
+                const deficit = req - ids.length;
+                if (deficit > 0) {
+                  const bStart = toAxisHour(geom.startHour);
+                  for (let i = 0; i < geom.hours; i++) {
+                    const h = Math.floor(bStart + i) % 24;
+                    hourlyDeficit[h] += deficit;
+                  }
+                  // still register an (invisible) tappable bar so staff can be assigned into the gap
                   rawBars.push({ isEmpty: true, slot, startHour: toAxisHour(geom.startHour), hours: geom.hours, have: ids.length, req });
                 }
               });
@@ -2940,12 +2946,10 @@ function AdminView({
                               <button
                                 key={`empty-${bar.slot.id}-${i}`}
                                 onClick={() => setAssignPickerKey(assignPickerKey === rk ? null : rk)}
-                                className="absolute rounded flex items-center justify-center overflow-hidden understaffed-mark"
-                                style={{ left: `calc(${left}% + 2px)`, width: `calc(${width}% - 4px)`, top: bar.lane * 26 + 5, height: 22, background: "#D98E0415", border: "1px dashed #D98E04" }}
-                                title={`${dispShort(date)} ${bar.slot.label} タップして割り当て`}
-                              >
-                                <span className="text-[9px] px-1 truncate font-medium" style={{ color: "#B5562B" }}>＋不足{bar.req - bar.have}名</span>
-                              </button>
+                                className="absolute rounded"
+                                style={{ left: `calc(${left}% + 2px)`, width: `calc(${width}% - 4px)`, top: bar.lane * 26 + 5, height: 22, background: "transparent" }}
+                                title={`${dispShort(date)} ${bar.slot.label} タップして割り当て（不足${bar.req - bar.have}名）`}
+                              />
                             );
                           }
                           const tKey = atKey(dayIdx, bar.slot.id, bar.staffId);
@@ -2969,6 +2973,27 @@ function AdminView({
                           );
                         })
                       )}
+                    </div>
+                  </div>
+                  <div className="flex border-b" style={{ borderColor: "#F2F0EA", height: 18 }}>
+                    <div style={{ width: 90 }} className="shrink-0 sticky left-0 bg-white z-10 border-r flex items-center px-2">
+                      <span className="text-[9px]" style={{ color: "#8A8776" }}>過不足</span>
+                    </div>
+                    <div className="relative flex-1">
+                      {hourlyDeficit.map((d, hIdx) => (
+                        <div
+                          key={hIdx}
+                          className="absolute top-0 h-full border-r flex items-center justify-center text-[9px] font-bold"
+                          style={{
+                            left: `${(hIdx / 24) * 100}%`, width: `${(1 / 24) * 100}%`,
+                            borderColor: "#F7F6F2",
+                            background: d > 0 ? "#C4453B15" : "transparent",
+                            color: "#C4453B",
+                          }}
+                        >
+                          {d > 0 ? `-${d}` : ""}
+                        </div>
+                      ))}
                     </div>
                   </div>
 
