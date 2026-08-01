@@ -1190,6 +1190,59 @@ function AdminView({
     return n;
   }, [assignments, slotGeom, staff, weekDates, slots, perStaffStats, effectiveWindow]);
 
+  // Checks, minute by minute within each slot's own time span, whether the ACTUAL number of
+  // people covering that moment (using each person's real clipped hours, not just "assigned to
+  // this slot") ever falls below the required headcount — catching cases where the slot's total
+  // headcount looks fine on paper but the timing doesn't actually overlap enough.
+  const coverageGapsList = useMemo(() => {
+    const gaps = [];
+    weekDates.forEach((date, dayIdx) => {
+      slots.forEach((slot) => {
+        const ids = assignments[key(dayIdx, slot.id)] || [];
+        if (ids.length === 0) return; // handled separately by the "不足" empty-slot indicator
+        const req = getRequired(dayIdx, slot);
+        if (req <= 0) return;
+        const slotStart = parseHour(slot.start);
+        let slotEnd = parseHour(slot.end);
+        if (slotEnd <= slotStart) slotEnd += 24;
+        const events = [];
+        ids.forEach((staffId) => {
+          const t = getAssignmentTime(dayIdx, slot, staffId);
+          let s = t.startHour;
+          let e = s + t.hours;
+          while (e < slotStart) { s += 24; e += 24; }
+          while (s > slotEnd) { s -= 24; e -= 24; }
+          events.push([s, 1]);
+          events.push([e, -1]);
+        });
+        events.sort((a, b) => a[0] - b[0]);
+        let count = 0;
+        let prevTime = slotStart;
+        const rawGaps = [];
+        events.forEach(([t, delta]) => {
+          const clampedT = Math.max(slotStart, Math.min(slotEnd, t));
+          if (clampedT > prevTime + 0.001 && count < req) rawGaps.push([prevTime, clampedT, count]);
+          prevTime = clampedT;
+          count += delta;
+        });
+        if (prevTime < slotEnd - 0.001 && count < req) rawGaps.push([prevTime, slotEnd, count]);
+        const merged = [];
+        rawGaps.forEach(([s, e, c]) => {
+          const last = merged[merged.length - 1];
+          if (last && last[2] === c && Math.abs(last[1] - s) < 0.001) last[1] = e;
+          else merged.push([s, e, c]);
+        });
+        if (merged.length > 0) {
+          gaps.push({
+            dayIdx, date, slot, req,
+            segments: merged.map(([s, e, c]) => ({ start: formatHM(Math.round(s * 60)), end: formatHM(Math.round(e * 60)), count: c })),
+          });
+        }
+      });
+    });
+    return gaps;
+  }, [assignments, slots, weekDates, assignmentTimeOverrides, requiredOverrides]);
+
   const violationsList = useMemo(() => {
     const list = [];
     weekDates.forEach((date, dayIdx) => {
@@ -2624,6 +2677,35 @@ function AdminView({
           </>
         );
       })()}
+
+      {/* Coverage-gap check — verifies real headcount minute-by-minute within each slot, not just the total */}
+      {coverageGapsList.length > 0 && (
+        <>
+          <div className="perforated bg-white" />
+          <div className="bg-white border px-6 py-4" style={{ borderColor: "#DCD9D0" }}>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="icon-badge" style={{ background: "#B5562B15" }}><AlertTriangle size={15} style={{ color: "#B5562B" }} /></span>
+              <h2 className="font-semibold text-sm" style={{ color: "#1B2A4A" }}>時間帯カバレッジのチェック</h2>
+              <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "#B5562B15", color: "#B5562B" }}>{coverageGapsList.length}件</span>
+            </div>
+            <p className="text-xs mb-2" style={{ color: "#8A8776" }}>枠全体では人数が揃っていても、時間帯の中に「実際にはその人数がいない時間」があると、ここに表示されます。</p>
+            <div className="space-y-2">
+              {coverageGapsList.map((g, i) => (
+                <div key={i} className="px-3 py-2 rounded" style={{ background: "#B5562B0D", border: "1px solid #B5562B30" }}>
+                  <div className="text-xs font-semibold mb-1" style={{ color: "#1B2A4A" }}>{dispShort(g.date)} {g.slot.label}（必要{g.req}人）</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {g.segments.map((seg, j) => (
+                      <span key={j} className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ background: "#B5562B15", color: "#B5562B" }}>
+                        {seg.start}〜{seg.end}：{seg.count}人しかいません
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Violations list — every condition/hours/rest-day violation in one place */}
       {violationsList.length > 0 && (
