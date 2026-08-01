@@ -574,6 +574,7 @@ export default function ShiftApp() {
         .slot-cell { transition: background 0.12s ease; cursor: pointer; }
         .slot-cell:hover { background: rgba(27,42,74,0.05); }
         .understaffed-mark { animation: pulse-warn 1.8s ease-in-out infinite; }
+        @media print { .understaffed-mark { display: none !important; } }
         @keyframes pulse-warn { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
         .daychip { transition: all 0.12s ease; }
         .daychip:active { transform: scale(0.94); }
