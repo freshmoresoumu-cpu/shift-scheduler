@@ -2865,12 +2865,12 @@ function AdminView({
           ))}
         </div>
         <div className="overflow-x-auto rounded border" style={{ borderColor: "#EFEDE7" }}>
-          <div style={{ minWidth: 900 }}>
+          <div style={{ minWidth: 1440 }}>
             {/* hour header */}
             <div className="flex border-b" style={{ borderColor: "#EFEDE7" }}>
               <div style={{ width: 90 }} className="shrink-0 sticky left-0 bg-white z-10 border-r" />
               <div className="relative flex-1" style={{ height: 24 }}>
-                {[0, 3, 6, 9, 12, 15, 18, 21, 24].map((axisH) => (
+                {Array.from({ length: 25 }, (_, i) => i).map((axisH) => (
                   <div key={axisH} className="absolute top-0 h-full text-[10px] mono flex items-center" style={{ left: `${(axisH / 24) * 100}%`, color: "#8A8776", transform: axisH === 24 ? "translateX(-100%)" : "none" }}>{(AXIS_START_HOUR + axisH) % 24}:00</div>
                 ))}
               </div>
@@ -2922,7 +2922,7 @@ function AdminView({
                       <span className="text-xs font-semibold mono" style={{ color: "#1B2A4A" }}>{dispShort(date)}</span>
                     </div>
                     <div className="relative flex-1">
-                      {[3, 6, 9, 12, 15, 18, 21].map((h) => (
+                      {Array.from({ length: 23 }, (_, i) => i + 1).map((h) => (
                         <div key={h} className="absolute top-0 h-full border-r" style={{ left: `${(h / 24) * 100}%`, borderColor: "#F7F6F2" }} />
                       ))}
                       {bars.length === 0 ? (
