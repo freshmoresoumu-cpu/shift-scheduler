@@ -2880,7 +2880,8 @@ function AdminView({
             {weekDates.map((date, dayIdx) => {
               // gather all (slot, staff) bars for this date; shortfall is tracked separately as an hourly strip
               const rawBars = [];
-              const hourlyDeficit = Array(24).fill(0); // index = axis-hour bucket (0 = AXIS_START_HOUR)
+              const hourlyRequired = Array(24).fill(0); // index = axis-hour bucket (0 = AXIS_START_HOUR); max required across overlapping slots
+              const hourlyAssigned = Array.from({ length: 24 }, () => new Set()); // distinct staff actually working that hour
               slots.forEach((slot) => {
                 const ids = assignments[key(dayIdx, slot.id)] || [];
                 const geom = slotGeom[slot.id];
@@ -2898,17 +2899,19 @@ function AdminView({
                   const displayTasks = p.isLeader ? [...new Set(["👑 リーダー", ...assignedTasks])] : assignedTasks;
                   rawBars.push({ isEmpty: false, staffId, name: p.name, isNewHire: tenureConflict, color: typeColor(p.type), startHour: toAxisHour(effTime.startHour), hours: effTime.hours, slot, effTime, conflict, conflictReasons: [availReason, nightConflict && "深夜不可", tenureConflict && "入社6ヶ月未満"].filter(Boolean), note: eff.note, assignedTasks: displayTasks, overCapacity: ids.length > req });
                 });
+                const bStart = toAxisHour(geom.startHour);
+                for (let i = 0; i < geom.hours; i++) {
+                  const h = Math.floor(bStart + i) % 24;
+                  hourlyRequired[h] = Math.max(hourlyRequired[h], req);
+                  ids.forEach((id) => hourlyAssigned[h].add(id));
+                }
                 const deficit = req - ids.length;
                 if (deficit > 0) {
-                  const bStart = toAxisHour(geom.startHour);
-                  for (let i = 0; i < geom.hours; i++) {
-                    const h = Math.floor(bStart + i) % 24;
-                    hourlyDeficit[h] += deficit;
-                  }
                   // still register an (invisible) tappable bar so staff can be assigned into the gap
                   rawBars.push({ isEmpty: true, slot, startHour: toAxisHour(geom.startHour), hours: geom.hours, have: ids.length, req });
                 }
               });
+              const hourlyDeficit = hourlyRequired.map((req, h) => Math.max(0, req - hourlyAssigned[h].size));
               // assign lanes to avoid overlap
               rawBars.sort((a, b) => a.startHour - b.startHour);
               const laneEnds = [];
